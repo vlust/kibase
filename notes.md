@@ -19,3 +19,11 @@ a setup for kicad projects with nice automated and collaberative workflows
   - bom and positions
   - changelog
 - how are custom libraries handled?
+
+
+inspo
+
+[youtube](https://www.youtube.com/watch?v=63R6Wnx44uY&t=1652s)
+[github](https://www.youtube.com/watch?v=63R6Wnx44uY&t=1652s)
+
+[blog](https://sschueller.github.io/posts/ci-cd-with-kicad-2025/)
