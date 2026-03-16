@@ -683,7 +683,7 @@
   comment posting
   - kiri:cleanup job for Pages cleanup on MR close
 
-✻ Cooked for 6m 50s
+✻ Worked for 6m 50s
 
 ❯ /btw                                                                          
   ⎿  Usage: /btw
@@ -1639,7 +1639,7 @@ right?
   README now says so explicitly: "only the commits that land on main are scanned
    for bump prefixes."
 
-✻ Churned for 4m 6s
+✻ Worked for 4m 6s
 
 ❯ /btw                                                                          
   ⎿  Usage: /btw
@@ -1683,3 +1683,25 @@ enough? dont want to make it to complicated if its a bad idea
   it, but the escape hatch is there when you redesign a power section and want
   v2.0.0 instead of v1.0.47. Want me to update version-bump.py and the README
   for that?
+
+❯ /export                                                                       
+  ⎿  Conversation exported to: /home/viktor/dev/main/kibase/2026-03-16-032045-im
+     plement-the-following-plan.txt
+
+❯ are tags automatically created on merge to main?                              
+
+● Yes — the release CI job runs on main and calls version-bump.py, which creates
+   and pushes an annotated git tag (example/v1.2.0) as part of its work. So the
+  flow is:
+
+  merge to main
+    → release CI job
+      → version-bump.py detects bump commits
+      → creates tag locally
+      → git push --tags
+      → creates GitLab release pointing at that tag
+
+  No manual tagging needed. The tag only gets created if there's at least one
+  change(...) or redesign(...) commit (or auto-patch trigger, if you go with
+  Option B) — otherwise the release job exits early with "No projects to
+  release."
