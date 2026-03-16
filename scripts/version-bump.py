@@ -9,16 +9,24 @@ creates an annotated git tag.
 
 Usage:
   python3 scripts/version-bump.py <project-name> [<project-name> ...]
-  python3 scripts/version-bump.py --all       # auto-detect all projects/
+  python3 scripts/version-bump.py --all       # auto-detect all projects
+
+Environment variables:
+  KIBASE_PROJECTS_DIR   Directory containing projects (default: projects)
+                        Set to "." for single-project repos.
 
 Commit message format:
-  change(board-a): add decoupling caps to 3V3 rail      → minor bump
-  redesign(board-a): switch from STM32F4 to RP2040      → major bump
+  change(board-a): add decoupling caps to 3V3 rail      → minor bump (main only)
+  redesign(board-a): switch from STM32F4 to RP2040      → major bump (main only)
   fix: typo in README                                   → no bump
   chore(board-a): update CI image                       → no bump
 
+  Note: bump commits only trigger a release on the main branch.
+  Using these prefixes on feature branches has no effect until merged.
+
 Tags:
   <project>/v<major>.<minor>.<patch>   e.g. example/v1.2.0
+  In single-project mode (KIBASE_PROJECTS_DIR=.): v<major>.<minor>.<patch>
 
 Exit codes:
   0  — at least one project was bumped (or --dry-run completed)
@@ -32,6 +40,12 @@ import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+
+
+# ── config ───────────────────────────────────────────────────────────────────
+
+PROJECTS_DIR = os.environ.get("KIBASE_PROJECTS_DIR", "projects")
+SINGLE_PROJECT_MODE = PROJECTS_DIR == "."
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────
@@ -49,9 +63,24 @@ def git(*args, check: bool = True) -> str:
     return run(["git", *args], check=check)
 
 
+def project_path(project: str) -> Path:
+    """Return the project root directory as a Path."""
+    if SINGLE_PROJECT_MODE:
+        return Path(".")
+    return Path(PROJECTS_DIR) / project
+
+
+def kicad_path(project: str) -> Path:
+    return project_path(project) / "kicad"
+
+
 def last_tag_for(project: str) -> str | None:
-    """Return the most recent tag matching <project>/v*, or None."""
-    tags = git("tag", "--list", f"{project}/v*", "--sort=-version:refname", check=False)
+    """Return the most recent tag matching <project>/v* (or v* in single-project mode)."""
+    if SINGLE_PROJECT_MODE:
+        pattern = "v*"
+    else:
+        pattern = f"{project}/v*"
+    tags = git("tag", "--list", pattern, "--sort=-version:refname", check=False)
     lines = [t.strip() for t in tags.splitlines() if t.strip()]
     return lines[0] if lines else None
 
@@ -64,13 +93,17 @@ def parse_version(tag: str) -> tuple[int, int, int]:
     return int(m.group(1)), int(m.group(2)), int(m.group(3))
 
 
-def commits_since(ref: str, project: str) -> list[dict]:
-    """Return commits touching projects/<project>/ since <ref>."""
+def commits_since(ref: str | None, project: str) -> list[dict]:
+    """Return commits touching the project's kicad/ (and root files) since <ref>."""
     log_range = f"{ref}..HEAD" if ref else "HEAD"
+    if SINGLE_PROJECT_MODE:
+        path_filter = "kicad/"
+    else:
+        path_filter = f"{PROJECTS_DIR}/{project}/"
     raw = git(
         "log", log_range,
         "--pretty=format:%H%x00%s%x00%b%x00",
-        "--", f"projects/{project}/",
+        "--", path_filter,
         check=False,
     )
     commits = []
@@ -91,16 +124,24 @@ def classify_commits(commits: list[dict], project: str) -> tuple[str | None, lis
     """
     Return (bump_type, messages).
     bump_type: 'major' | 'minor' | None
-    messages: list of relevant commit subjects for the changelog
+
+    In single-project mode, also accepts bare 'change:' / 'redesign:' (no parens).
     """
     bump = None
     messages = []
     for c in commits:
         subject = c["subject"]
-        if re.match(rf"^redesign\({re.escape(project)}\)\s*:", subject, re.IGNORECASE):
+        # With explicit project scope: change(board-a): ...
+        scoped_minor = re.match(rf"^change\({re.escape(project)}\)\s*:", subject, re.IGNORECASE)
+        scoped_major = re.match(rf"^redesign\({re.escape(project)}\)\s*:", subject, re.IGNORECASE)
+        # Bare form for single-project repos: change: ... / redesign: ...
+        bare_minor = SINGLE_PROJECT_MODE and re.match(r"^change\s*:", subject, re.IGNORECASE)
+        bare_major = SINGLE_PROJECT_MODE and re.match(r"^redesign\s*:", subject, re.IGNORECASE)
+
+        if scoped_major or bare_major:
             bump = "major"
             messages.append(subject)
-        elif re.match(rf"^change\({re.escape(project)}\)\s*:", subject, re.IGNORECASE):
+        elif scoped_minor or bare_minor:
             if bump != "major":
                 bump = "minor"
             messages.append(subject)
@@ -116,7 +157,7 @@ def bump_version(major: int, minor: int, patch: int, bump: str) -> tuple[int, in
 
 
 def update_changelog(project: str, version: str, messages: list[str], dry_run: bool) -> None:
-    changelog_path = Path(f"projects/{project}/CHANGELOG.md")
+    changelog_path = project_path(project) / "CHANGELOG.md"
     today = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d")
     section = f"## [{version}] — {today}\n\n"
     for msg in messages:
@@ -128,12 +169,10 @@ def update_changelog(project: str, version: str, messages: list[str], dry_run: b
     else:
         content = f"# Changelog — {project}\n\n## [Unreleased]\n"
 
-    # Insert after the first line (title) or after ## [Unreleased]
     unreleased_marker = "## [Unreleased]"
     if unreleased_marker in content:
         content = content.replace(unreleased_marker, f"{unreleased_marker}\n\n{section}", 1)
     else:
-        # Prepend after the first heading
         lines = content.splitlines(keepends=True)
         insert_at = 1
         for i, line in enumerate(lines):
@@ -151,7 +190,7 @@ def update_changelog(project: str, version: str, messages: list[str], dry_run: b
 
 
 def write_version_file(project: str, version: str, dry_run: bool) -> None:
-    version_path = Path(f"projects/{project}/VERSION")
+    version_path = project_path(project) / "VERSION"
     if not dry_run:
         version_path.write_text(version + "\n")
         print(f"  Wrote {version_path}")
@@ -160,7 +199,10 @@ def write_version_file(project: str, version: str, dry_run: bool) -> None:
 
 
 def create_tag(project: str, version: str, messages: list[str], dry_run: bool) -> None:
-    tag = f"{project}/v{version}"
+    if SINGLE_PROJECT_MODE:
+        tag = f"v{version}"
+    else:
+        tag = f"{project}/v{version}"
     annotation = f"Release {project} v{version}\n\n" + "\n".join(f"- {m}" for m in messages)
     if not dry_run:
         git("tag", "-a", tag, "-m", annotation)
@@ -184,7 +226,7 @@ def process_project(project: str, dry_run: bool) -> bool:
         major, minor, patch = 0, 0, 0
 
     commits = commits_since(last_tag, project)
-    print(f"  Commits   : {len(commits)} touching projects/{project}/ since last tag")
+    print(f"  Commits   : {len(commits)} since last tag")
 
     bump, messages = classify_commits(commits, project)
     if not bump:
@@ -206,26 +248,34 @@ def process_project(project: str, dry_run: bool) -> bool:
 
 
 def discover_projects() -> list[str]:
-    projects_dir = Path("projects")
+    if SINGLE_PROJECT_MODE:
+        kicad_pro = next(Path("kicad").glob("*.kicad_pro"), None) if Path("kicad").exists() else None
+        if kicad_pro:
+            return [kicad_pro.stem]
+        return []
+    projects_dir = Path(PROJECTS_DIR)
     if not projects_dir.exists():
         return []
     return [
         p.name for p in sorted(projects_dir.iterdir())
-        if p.is_dir() and any(p.glob("*.kicad_pro"))
+        if p.is_dir() and any((p / "kicad").glob("*.kicad_pro"))
     ]
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("projects", nargs="*", metavar="PROJECT", help="Project name(s) under projects/")
-    parser.add_argument("--all", action="store_true", help="Process all projects/ subdirectories")
-    parser.add_argument("--dry-run", action="store_true", help="Print what would happen without making changes")
+    parser = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument("projects", nargs="*", metavar="PROJECT")
+    parser.add_argument("--all", action="store_true", help="Process all discovered projects")
+    parser.add_argument("--dry-run", action="store_true", help="Print what would happen without changes")
     args = parser.parse_args()
 
     if args.all:
         projects = discover_projects()
         if not projects:
-            print("No projects found under projects/", file=sys.stderr)
+            print("No projects found.", file=sys.stderr)
             sys.exit(1)
         print(f"Discovered projects: {', '.join(projects)}")
     elif args.projects:
@@ -234,14 +284,14 @@ def main() -> None:
         parser.print_help()
         sys.exit(1)
 
-    # Must run from repo root
     repo_root = run(["git", "rev-parse", "--show-toplevel"])
     os.chdir(repo_root)
 
     bumped_any = False
     for project in projects:
-        if not Path(f"projects/{project}").is_dir():
-            print(f"Warning: projects/{project} not found — skipping.", file=sys.stderr)
+        p = project_path(project)
+        if not p.is_dir():
+            print(f"Warning: {p} not found — skipping.", file=sys.stderr)
             continue
         bumped = process_project(project, dry_run=args.dry_run)
         if bumped:

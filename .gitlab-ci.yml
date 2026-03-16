@@ -17,6 +17,8 @@ variables:
   GIT_DEPTH: 0                   # full history needed for version-bump + KiRI
   GIT_STRATEGY: clone
   FF_USE_FASTZIP: "true"
+  # Set to "." for single-project repos (no projects/ subdirectory).
+  KIBASE_PROJECTS_DIR: "projects"
 
 stages:
   - validate
@@ -38,12 +40,26 @@ stages:
 .kibot_run: &kibot_run |
   # Run KiBot for a given project and stage.
   # Expects PROJECT and STAGE variables to be set.
-  mkdir -p "projects/${PROJECT}/output"
+  # Resolves the project root from KIBASE_PROJECTS_DIR:
+  #   monorepo:       ${KIBASE_PROJECTS_DIR}/${PROJECT}/kicad/
+  #   single-project: kicad/
+  if [[ "${KIBASE_PROJECTS_DIR}" == "." ]]; then
+    PROJECT_ROOT="."
+  else
+    PROJECT_ROOT="${KIBASE_PROJECTS_DIR}/${PROJECT}"
+  fi
+  KICAD_PRO="$(find "${PROJECT_ROOT}/kicad" -maxdepth 1 -name '*.kicad_pro' | head -n1)"
+  if [[ -z "${KICAD_PRO}" ]]; then
+    echo "Error: no .kicad_pro found in ${PROJECT_ROOT}/kicad/" >&2
+    exit 1
+  fi
+  KICAD_STEM="$(basename "${KICAD_PRO}" .kicad_pro)"
+  mkdir -p "${PROJECT_ROOT}/output"
   kibot \
-    --board-file "projects/${PROJECT}/${PROJECT}.kicad_pcb" \
-    --schematic  "projects/${PROJECT}/${PROJECT}.kicad_sch" \
+    --board-file "${PROJECT_ROOT}/kicad/${KICAD_STEM}.kicad_pcb" \
+    --schematic  "${PROJECT_ROOT}/kicad/${KICAD_STEM}.kicad_sch" \
     --config     "kibot/${STAGE}.yaml" \
-    --out-dir    "projects/${PROJECT}/output"
+    --out-dir    "${PROJECT_ROOT}/output"
 
 # ── validate stage ───────────────────────────────────────────────────────────
 
@@ -98,7 +114,7 @@ review:generate:
   artifacts:
     name: "review-${CI_COMMIT_SHORT_SHA}"
     paths:
-      - projects/*/output/review/
+      - "*/output/review/"
     expire_in: 30 days
 
 # Commit updated PDFs back to main (docs/ directory)
@@ -114,12 +130,18 @@ review:commit-docs:
       git config user.name  "kibase CI"
       COMMITTED=0
       for PROJECT in ${CHANGED_PROJECTS}; do
-        SCH_PDF="projects/${PROJECT}/output/review/schematic_${PROJECT}.pdf"
-        LAY_PDF="projects/${PROJECT}/output/review/layout_${PROJECT}.pdf"
-        mkdir -p "projects/${PROJECT}/docs"
-        [[ -f "${SCH_PDF}" ]] && cp "${SCH_PDF}" "projects/${PROJECT}/docs/schematic.pdf"
-        [[ -f "${LAY_PDF}" ]] && cp "${LAY_PDF}" "projects/${PROJECT}/docs/layout.pdf"
-        git add "projects/${PROJECT}/docs/" || true
+        if [[ "${KIBASE_PROJECTS_DIR}" == "." ]]; then
+          PROJECT_ROOT="."
+        else
+          PROJECT_ROOT="${KIBASE_PROJECTS_DIR}/${PROJECT}"
+        fi
+        KICAD_STEM="$(find "${PROJECT_ROOT}/kicad" -maxdepth 1 -name '*.kicad_pro' | head -n1 | xargs basename 2>/dev/null | sed 's/\.kicad_pro//')"
+        SCH_PDF="${PROJECT_ROOT}/output/review/schematic_${KICAD_STEM}.pdf"
+        LAY_PDF="${PROJECT_ROOT}/output/review/layout_${KICAD_STEM}.pdf"
+        mkdir -p "${PROJECT_ROOT}/docs"
+        [[ -f "${SCH_PDF}" ]] && cp "${SCH_PDF}" "${PROJECT_ROOT}/docs/schematic.pdf"
+        [[ -f "${LAY_PDF}" ]] && cp "${LAY_PDF}" "${PROJECT_ROOT}/docs/layout.pdf"
+        git add "${PROJECT_ROOT}/docs/" || true
         COMMITTED=1
       done
       if [[ "${COMMITTED}" == "1" ]]; then
@@ -144,12 +166,19 @@ review:kiri:
       export KIRI_BASE="${CI_MERGE_REQUEST_DIFF_BASE_SHA}"
       for PROJECT in ${CHANGED_PROJECTS}; do
         echo "━━ Generating KiRI diff for ${PROJECT} ━━"
-        mkdir -p "projects/${PROJECT}/output"
+        if [[ "${KIBASE_PROJECTS_DIR}" == "." ]]; then
+          PROJECT_ROOT="."
+        else
+          PROJECT_ROOT="${KIBASE_PROJECTS_DIR}/${PROJECT}"
+        fi
+        KICAD_PRO="$(find "${PROJECT_ROOT}/kicad" -maxdepth 1 -name '*.kicad_pro' | head -n1)"
+        KICAD_STEM="$(basename "${KICAD_PRO}" .kicad_pro)"
+        mkdir -p "${PROJECT_ROOT}/output"
         kibot \
-          --board-file "projects/${PROJECT}/${PROJECT}.kicad_pcb" \
-          --schematic  "projects/${PROJECT}/${PROJECT}.kicad_sch" \
+          --board-file "${PROJECT_ROOT}/kicad/${KICAD_STEM}.kicad_pcb" \
+          --schematic  "${PROJECT_ROOT}/kicad/${KICAD_STEM}.kicad_sch" \
           --config     "kibot/review.yaml" \
-          --out-dir    "projects/${PROJECT}/output" \
+          --out-dir    "${PROJECT_ROOT}/output" \
           -e KIRI_BASE="${KIRI_BASE}" \
           --skip-pre all \
           kiri_diff
@@ -168,7 +197,11 @@ review:kiri:
         git checkout kiri-pages
         mkdir -p "public/mr-${CI_MERGE_REQUEST_IID}"
         for PROJECT in ${CHANGED_PROJECTS}; do
-          KIRI_OUT="projects/${PROJECT}/output/kiri"
+          if [[ "${KIBASE_PROJECTS_DIR}" == "." ]]; then
+            KIRI_OUT="output/kiri"
+          else
+            KIRI_OUT="${KIBASE_PROJECTS_DIR}/${PROJECT}/output/kiri"
+          fi
           if [[ -d "${KIRI_OUT}" ]]; then
             cp -r "${KIRI_OUT}" "public/mr-${CI_MERGE_REQUEST_IID}/${PROJECT}"
           fi
@@ -191,7 +224,7 @@ review:kiri:
   artifacts:
     expose_as: 'KiRI Diff'
     paths:
-      - projects/*/output/kiri/
+      - "*/output/kiri/"
     expire_in: 30 days
 
 # ── release stage ────────────────────────────────────────────────────────────
@@ -231,7 +264,11 @@ release:
       done
 
       # Commit CHANGELOG.md and VERSION changes
-      git add projects/*/CHANGELOG.md projects/*/VERSION
+      if [[ "${KIBASE_PROJECTS_DIR}" == "." ]]; then
+        git add CHANGELOG.md VERSION 2>/dev/null || true
+      else
+        git add "${KIBASE_PROJECTS_DIR}"/*/CHANGELOG.md "${KIBASE_PROJECTS_DIR}"/*/VERSION 2>/dev/null || true
+      fi
       if ! git diff --cached --quiet; then
         git commit -m "release: bump versions and update changelogs [skip ci]"
         git push "https://ci:${GITLAB_BOT_TOKEN}@${CI_SERVER_HOST}/${CI_PROJECT_PATH}.git" \
@@ -243,9 +280,16 @@ release:
 
       # Create GitLab releases for each bumped project
       for PROJECT in ${BUMPED_PROJECTS}; do
-        VERSION="$(cat "projects/${PROJECT}/VERSION" 2>/dev/null || echo "0.0.0")"
-        TAG="${PROJECT}/v${VERSION}"
-        FAB_ZIP="projects/${PROJECT}/output/release/${PROJECT}-fab.zip"
+        if [[ "${KIBASE_PROJECTS_DIR}" == "." ]]; then
+          PROJECT_ROOT="."
+          TAG="v$(cat VERSION 2>/dev/null || echo '0.0.0')"
+        else
+          PROJECT_ROOT="${KIBASE_PROJECTS_DIR}/${PROJECT}"
+          TAG="${PROJECT}/v$(cat "${PROJECT_ROOT}/VERSION" 2>/dev/null || echo '0.0.0')"
+        fi
+        VERSION="$(cat "${PROJECT_ROOT}/VERSION" 2>/dev/null || echo "0.0.0")"
+        KICAD_STEM="$(find "${PROJECT_ROOT}/kicad" -maxdepth 1 -name '*.kicad_pro' | head -n1 | xargs basename 2>/dev/null | sed 's/\.kicad_pro//')"
+        FAB_ZIP="${PROJECT_ROOT}/output/release/${KICAD_STEM}-fab.zip"
 
         # Upload fab artifact
         if [[ -f "${FAB_ZIP}" ]]; then
@@ -257,13 +301,12 @@ release:
         fi
 
         # Create release
-        RELEASE_BODY="$(python3 - <<'EOF'
-import sys
-import pathlib
-changelog = pathlib.Path(f"projects/${PROJECT}/CHANGELOG.md").read_text()
-# Extract the first version section
-import re
-m = re.search(r'(## \[v?[\d.]+\].*?)(?=## \[|$)', changelog, re.DOTALL)
+        RELEASE_BODY="$(python3 - "${PROJECT_ROOT}" <<'EOF'
+import sys, pathlib, re, os
+project_root = sys.argv[1]
+changelog = pathlib.Path(project_root) / "CHANGELOG.md"
+text = changelog.read_text() if changelog.exists() else ""
+m = re.search(r'(## \[v?[\d.]+\].*?)(?=## \[|$)', text, re.DOTALL)
 print(m.group(1).strip() if m else "Initial release")
 EOF
 )"
@@ -290,7 +333,7 @@ EOF
   artifacts:
     name: "release-${CI_COMMIT_SHORT_SHA}"
     paths:
-      - projects/*/output/release/
+      - "*/output/release/"
     expire_in: 90 days
 
 # ── MR cleanup (on MR close/merge) ──────────────────────────────────────────

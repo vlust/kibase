@@ -14,8 +14,8 @@ Draft → Review → Released workflow.
 # 1. Create the project directory
 mkdir -p projects/my-board
 
-# 2. Open KiCad and create a new project inside projects/my-board/
-#    Name the .kicad_pro file to match the directory: my-board.kicad_pro
+# 2. Open KiCad and create a new project inside projects/my-board/kicad/
+#    Name the .kicad_pro file to match the board: my-board.kicad_pro
 
 # 3. Set text variables in the .kicad_pro file:
 #    REVISION, PROJECT_NAME, COMPANY
@@ -51,12 +51,17 @@ Outputs appear in `projects/example/output/`. This directory is git-ignored.
 kibase/
 ├── projects/
 │   └── example/
-│       ├── example.kicad_pro        # KiCad project (text variables: REVISION, PROJECT_NAME, COMPANY)
-│       ├── example.kicad_sch        # Schematic
-│       ├── example.kicad_pcb        # Layout
+│       ├── kicad/                   # KiCad project files
+│       │   ├── example.kicad_pro    # Text variables: REVISION, PROJECT_NAME, COMPANY
+│       │   ├── example.kicad_sch
+│       │   └── example.kicad_pcb
 │       ├── docs/                    # Committed PDFs (auto-updated by CI on main)
 │       │   ├── schematic.pdf
 │       │   └── layout.pdf
+│       ├── design/                  # Design documents (requirements, block diagrams, notes)
+│       ├── datasheets/              # Component datasheets
+│       ├── simulation/              # SPICE / LTspice simulation files
+│       ├── mechanical/              # Mechanical drawings, DXF, enclosure files
 │       ├── CHANGELOG.md             # Per-project changelog (auto-managed)
 │       └── VERSION                  # Current version string (auto-managed by CI)
 ├── libraries/                       # Git submodule — shared KiCad symbol/footprint libraries
@@ -74,6 +79,32 @@ kibase/
 ├── .gitmodules
 ├── .gitignore
 └── README.md
+```
+
+### Single-project repos
+
+To use kibase for a single board (no `projects/` subdirectory), set
+`KIBASE_PROJECTS_DIR=.` in your CI variables and structure the repo like:
+
+```
+my-board-repo/
+├── kicad/
+│   ├── my-board.kicad_pro
+│   ├── my-board.kicad_sch
+│   └── my-board.kicad_pcb
+├── docs/
+├── design/
+├── datasheets/
+├── simulation/
+├── mechanical/
+├── CHANGELOG.md
+└── VERSION
+```
+
+Commit prefixes work the same way. Bare form is also accepted in single-project mode:
+```
+change: add bulk decoupling caps     ← minor bump (no project name needed)
+redesign: reroute power tree         ← major bump
 ```
 
 ---
@@ -111,10 +142,14 @@ kibase/
 
 ## Commit message conventions
 
-Version bumps are triggered by commit messages with specific prefixes.
+Version bumps are triggered by commit messages with specific prefixes
+**on the main branch only**. Using these prefixes on a feature branch
+has no effect — they are evaluated by `version-bump.py` during the
+`release` CI stage, which only runs after merging to main.
+
 The project name in parentheses must match the directory name under `projects/`.
 
-| Prefix | Effect |
+| Prefix | Effect (on main) |
 |---|---|
 | `change(my-board): description` | Minor version bump (`0.1.0` → `0.2.0`) |
 | `redesign(my-board): description` | Major version bump (`0.1.0` → `1.0.0`) |
@@ -126,10 +161,13 @@ Examples:
 change(my-board): add bulk decoupling to 3V3 rail
 change(my-board): route USB differential pair as diff pair
 redesign(my-board): replace STM32F4 with RP2040
-chore: update CI image version              ← no bump
-docs: fix README typo                       ← no bump
-fix: correct schematic net label            ← no bump
+chore: update CI image version              ← no bump, ever
+docs: fix README typo                       ← no bump, ever
+fix: correct schematic net label            ← no bump, ever
 ```
+
+On a feature branch you can use any commit message style you like — only
+the commits that land on main (after merge) are scanned for bump prefixes.
 
 ---
 
