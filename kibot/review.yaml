@@ -1,0 +1,107 @@
+kibot:
+  version: 1
+
+# Review stage: schematic PDF, PCB layout PDF, ERC/DRC reports,
+# interactive HTML BOM, and KiRI visual diff (on MR pipelines).
+# Run locally with: ./scripts/generate.sh projects/<name> review
+
+import:
+  - file: ../kibot/globals.yaml
+  - file: ../kibot/filters.yaml
+
+preflight:
+  erc:
+    dir: 'output/review/reports'
+    format: 'HTML, RPT'
+    output: 'erc_%f.%x'
+    # dont_stop: true allows CI to collect the report even when errors exist.
+    # The CI job reads the report to decide pass/fail.
+  drc:
+    dir: 'output/review/reports'
+    dont_stop: true
+    format: 'HTML, RPT'
+    output: 'drc_%f.%x'
+    check_zone_fills: true
+
+outputs:
+  # --- Schematic PDF ---
+  - name: schematic_pdf
+    comment: 'Schematic PDF (all sheets, A4)'
+    type: pdf_sch_print
+    dir: 'output/review'
+    options:
+      background_color: false
+      color_theme: default
+      output: 'schematic_%f.%x'
+
+  # --- PCB layout PDF (top + bottom assembly views) ---
+  - name: layout_pdf
+    comment: 'PCB layout PDF — top and bottom assembly views'
+    type: pcb_print
+    dir: 'output/review'
+    options:
+      format: PDF
+      output: 'layout_%f.%x'
+      color_theme: default
+      dpi: 1200
+      pages:
+        - layers:
+            - layer: Edge.Cuts
+              color: '#000000'
+            - layer: F.Cu
+              color: '#EEDAB5'
+            - layer: F.Silkscreen
+              color: '#DB9DE1'
+            - layer: F.Fab
+              color: '#744679'
+            - layer: F.Courtyard
+              color: '#FF00FF'
+          sheet: 'Top Assembly'
+          title: 'Top Assembly'
+          scaling: 1.0
+        - layers:
+            - layer: Edge.Cuts
+              color: '#000000'
+            - layer: B.Cu
+              color: '#D5DBF4'
+            - layer: B.Silkscreen
+              color: '#DB9DE1'
+            - layer: B.Fab
+              color: '#400080'
+            - layer: B.Courtyard
+              color: '#FF00FF'
+          sheet: 'Bottom Assembly'
+          title: 'Bottom Assembly'
+          mirror: true
+          scaling: 1.0
+
+  # --- Interactive HTML BOM ---
+  - name: ibom
+    comment: 'Interactive HTML BOM (for MR review)'
+    type: ibom
+    dir: 'output/review'
+    options:
+      dark_mode: true
+      show_fields: 'Value,Footprint,LCSC'
+      group_fields: 'Value,LCSC'
+      show_fabrication: true
+      highlight_pin1: selected
+      exclude_filter: exclude_testpoints
+      hide_excluded: true
+      output: 'ibom_%f.%x'
+
+  # --- KiRI visual diff (MR pipelines only) ---
+  # CI sets KIRI_BASE env var to $CI_MERGE_REQUEST_DIFF_BASE_SHA.
+  # Locally, this defaults to HEAD (shows last N commits).
+  - name: kiri_diff
+    comment: 'KiRI interactive schematic/PCB diff viewer'
+    type: kiri
+    dir: 'output/kiri'
+    layers: all
+    options:
+      max_commits: 0
+      # revision is overridden by CI via --global-variant or env var injection.
+      # When KIRI_BASE is set in the environment, KiBot picks it up via %E{KIRI_BASE}.
+      revision: '%E{KIRI_BASE,HEAD}'
+      zones: global
+      keep_generated: true

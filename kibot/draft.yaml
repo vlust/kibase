@@ -1,0 +1,21 @@
+kibot:
+  version: 1
+
+# Draft stage: schematic PDF only.
+# Fast output for WIP sharing — no PCB outputs, no ERC/DRC.
+# Run locally with: ./scripts/generate.sh projects/<name> draft
+
+import:
+  - file: ../kibot/globals.yaml
+
+outputs:
+  - name: schematic_pdf_draft
+    comment: 'Schematic PDF (DRAFT watermark)'
+    type: pdf_sch_print
+    dir: 'output/draft'
+    options:
+      background_color: false
+      color_theme: default
+      # The DRAFT text comes from the schematic title block / text variable.
+      # Set REVISION to "DRAFT" in your .kicad_pro text_variables, or use
+      # a separate text variable STAGE=DRAFT on the schematic.

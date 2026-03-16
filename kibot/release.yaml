@@ -1,0 +1,187 @@
+kibot:
+  version: 1
+
+# Released stage: all Review outputs plus full fab package for JLCPCB.
+# Outputs go to output/ (not committed to git).
+# CI attaches these as release artifacts.
+# Run locally with: ./scripts/generate.sh projects/<name> release
+
+import:
+  - file: ../kibot/globals.yaml
+  - file: ../kibot/filters.yaml
+
+preflight:
+  erc:
+    dir: 'output/release/reports'
+    format: 'HTML, RPT'
+    output: 'erc_%f.%x'
+  drc:
+    dir: 'output/release/reports'
+    dont_stop: true
+    format: 'HTML, RPT'
+    output: 'drc_%f.%x'
+    check_zone_fills: true
+
+outputs:
+  # --- Schematic PDF ---
+  - name: schematic_pdf
+    comment: 'Schematic PDF (released)'
+    type: pdf_sch_print
+    dir: 'output/release/docs'
+    options:
+      background_color: false
+      color_theme: default
+      output: 'schematic_%f.%x'
+
+  # --- PCB layout PDF ---
+  - name: layout_pdf
+    comment: 'PCB layout PDF — top and bottom assembly views'
+    type: pcb_print
+    dir: 'output/release/docs'
+    options:
+      format: PDF
+      output: 'layout_%f.%x'
+      color_theme: default
+      dpi: 1200
+      pages:
+        - layers:
+            - layer: Edge.Cuts
+              color: '#000000'
+            - layer: F.Cu
+              color: '#EEDAB5'
+            - layer: F.Silkscreen
+              color: '#DB9DE1'
+            - layer: F.Fab
+              color: '#744679'
+          sheet: 'Top Assembly'
+          title: 'Top Assembly'
+          scaling: 1.0
+        - layers:
+            - layer: Edge.Cuts
+              color: '#000000'
+            - layer: B.Cu
+              color: '#D5DBF4'
+            - layer: B.Silkscreen
+              color: '#DB9DE1'
+            - layer: B.Fab
+              color: '#400080'
+          sheet: 'Bottom Assembly'
+          title: 'Bottom Assembly'
+          mirror: true
+          scaling: 1.0
+
+  # --- Interactive HTML BOM ---
+  - name: ibom
+    comment: 'Interactive HTML BOM'
+    type: ibom
+    dir: 'output/release/assembly'
+    options:
+      dark_mode: true
+      show_fields: 'Value,Footprint,LCSC'
+      group_fields: 'Value,LCSC'
+      show_fabrication: true
+      highlight_pin1: selected
+      exclude_filter: exclude_testpoints
+      hide_excluded: true
+      output: 'ibom_%f.%x'
+
+  # --- Gerbers (JLCPCB layer naming) ---
+  - name: gerbers
+    comment: 'Gerber files (JLCPCB format)'
+    type: gerber
+    dir: 'output/release/gerbers'
+    layers:
+      - F.Cu
+      - B.Cu
+      - F.Silkscreen
+      - B.Silkscreen
+      - F.Mask
+      - B.Mask
+      - F.Paste
+      - B.Paste
+      - Edge.Cuts
+    options:
+      subtract_mask_from_silk: true
+      plot_footprint_refs: true
+      plot_footprint_values: false
+      create_gerber_job_file: false
+      # JLCPCB uses KiCad 6+ file extensions (.gtl, .gbl, etc.)
+      use_gerber_x2_attributes: true
+      use_gerber_net_attributes: false
+
+  # --- Excellon drill files (JLCPCB format) ---
+  - name: drill
+    comment: 'Excellon drill files (JLCPCB format)'
+    type: excellon
+    dir: 'output/release/gerbers'
+    options:
+      metric_units: true
+      minimal_header: true
+      pth_and_npth_single_file: false
+      generate_drill_files: both
+      map:
+        type: gerber
+
+  # --- BOM CSV (JLCPCB format) ---
+  # Columns: Comment, Designator, Footprint, LCSC Part #
+  - name: bom_jlcpcb
+    comment: 'BOM CSV for JLCPCB (with LCSC Part # column)'
+    type: bom
+    dir: 'output/release/assembly'
+    options:
+      format: CSV
+      output: '%f-BOM.%x'
+      ref_separator: ','
+      exclude_filter: exclude_dnp
+      # Rename LCSC → LCSC Part # for JLCPCB upload
+      pre_transform: lcsc_field_rename
+      group_fields:
+        - Value
+        - Footprint
+        - LCSC Part #
+      columns:
+        - field: Value
+          name: Comment
+        - field: References
+          name: Designator
+        - field: Footprint
+          name: Footprint
+        - field: LCSC Part #
+          name: LCSC Part #
+      csv:
+        hide_pcb_info: true
+        hide_stats_info: true
+
+  # --- Component placement / CPL file (JLCPCB format) ---
+  - name: cpl_jlcpcb
+    comment: 'Component placement file for JLCPCB (with rotation corrections)'
+    type: position
+    dir: 'output/release/assembly'
+    options:
+      format: CSV
+      output: '%f-CPL.%x'
+      units: millimeters
+      separate_files_for_front_and_back: false
+      only_smd: false
+      include_virtual: false
+      exclude_filter: exclude_dnp
+      # KiBot's built-in JLCPCB rotation correction database
+      pre_transform: _rot_footprint
+
+  # --- Compress all fab files into a single ZIP ---
+  - name: fab_zip
+    comment: 'Zipped fabrication package (gerbers + drill + BOM + CPL)'
+    type: compress
+    dir: 'output/release'
+    options:
+      output: '%f-fab.%x'
+      format: ZIP
+      files:
+        - from_output: gerbers
+          dest: gerbers/
+        - from_output: drill
+          dest: gerbers/
+        - from_output: bom_jlcpcb
+          dest: assembly/
+        - from_output: cpl_jlcpcb
+          dest: assembly/

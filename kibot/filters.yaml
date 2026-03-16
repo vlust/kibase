@@ -1,0 +1,32 @@
+kibot:
+  version: 1
+
+# Shared component filters for BOM, position, and assembly outputs.
+# Imported by review.yaml and release.yaml.
+
+filters:
+  # Exclude DNP (Do Not Place) components from BOM and placement
+  - name: exclude_dnp
+    comment: 'Exclude DNP components from BOM and placement files'
+    type: generic
+    exclude_any:
+      - column: DNP
+        regex: "^(yes|true|1|x)$"
+        regex_flags: IGNORECASE
+
+  # Exclude test points from placement files
+  - name: exclude_testpoints
+    comment: 'Exclude test points (TP*) from placement'
+    type: generic
+    exclude_any:
+      - column: Reference
+        regex: "^TP"
+
+  # Rename LCSC field for JLCPCB BOM compatibility
+  # JLCPCB expects the column header "LCSC Part #"
+  - name: lcsc_field_rename
+    comment: 'Rename LCSC field to "LCSC Part #" for JLCPCB BOM format'
+    type: field_rename
+    rename:
+      - field: 'LCSC'
+        name: 'LCSC Part #'

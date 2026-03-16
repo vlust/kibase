@@ -1,0 +1,34 @@
+kibot:
+  version: 1
+
+# Shared global settings for all kibase projects.
+# Imported by draft.yaml, review.yaml, and release.yaml via `import`.
+#
+# Text variables (REVISION, PROJECT_NAME, COMPANY) are read from the
+# .kicad_pro file of the project being processed.
+
+global:
+  out_dir: 'output'
+
+  # Suppress common benign warnings
+  filters:
+    # KiCad config without environment.vars section
+    - number: 9
+    # Unable to find KiCad 3D models
+    - number: 10
+    # More than one SCH file found
+    - number: 44
+    # No output to handle
+    - number: 168
+
+  # JLCPCB gerber/drill format requirements
+  # These are referenced by release.yaml outputs.
+  vars:
+    jlcpcb_drill_units: mm
+    jlcpcb_minimal_header: true
+    jlcpcb_metric_units: true
+    jlcpcb_pth_npth_single_file: false
+    jlcpcb_map_format: gerber
+
+  # Default color theme for PDF outputs
+  color_theme: default

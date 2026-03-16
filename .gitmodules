@@ -1,0 +1,5 @@
+[submodule "libraries"]
+	path = libraries
+	url = https://gitlab.com/your-org/kicad-libraries.git
+	# Replace with your actual KiCad library repo URL.
+	# To initialize: git submodule update --init --recursive

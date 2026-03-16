@@ -1,0 +1,318 @@
+##############################################################################
+# kibase GitLab CI/CD pipeline
+#
+# Stages:
+#   validate  — ERC/DRC on all changed projects (MR + push)
+#   review    — Generate review PDFs + KiRI diff (MR + push)
+#   release   — Version bump, commit PDFs, create GitLab release (main only)
+#
+# Required CI variables:
+#   GITLAB_BOT_TOKEN   — Project access token with write_repository + api scope
+#                        (for pushing docs back to main and KiRI pages branch)
+##############################################################################
+
+image: ghcr.io/inti-cern/kibot:dev
+
+variables:
+  GIT_DEPTH: 0                   # full history needed for version-bump + KiRI
+  GIT_STRATEGY: clone
+  FF_USE_FASTZIP: "true"
+
+stages:
+  - validate
+  - review
+  - release
+
+# ── helpers ──────────────────────────────────────────────────────────────────
+
+.detect_projects: &detect_projects |
+  CHANGED_PROJECTS="$(./scripts/detect-changed-projects.sh \
+    "${CI_COMMIT_BEFORE_SHA:-${CI_MERGE_REQUEST_DIFF_BASE_SHA:-HEAD^}}" \
+    "${CI_COMMIT_SHA}" 2>/dev/null || true)"
+  if [[ -z "${CHANGED_PROJECTS}" ]]; then
+    echo "No projects changed — skipping."
+    exit 0
+  fi
+  echo "Changed projects: ${CHANGED_PROJECTS}"
+
+.kibot_run: &kibot_run |
+  # Run KiBot for a given project and stage.
+  # Expects PROJECT and STAGE variables to be set.
+  mkdir -p "projects/${PROJECT}/output"
+  kibot \
+    --board-file "projects/${PROJECT}/${PROJECT}.kicad_pcb" \
+    --schematic  "projects/${PROJECT}/${PROJECT}.kicad_sch" \
+    --config     "kibot/${STAGE}.yaml" \
+    --out-dir    "projects/${PROJECT}/output"
+
+# ── validate stage ───────────────────────────────────────────────────────────
+
+validate:
+  stage: validate
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH && $CI_COMMIT_BRANCH != $CI_DEFAULT_BRANCH
+  script:
+    - *detect_projects
+    - |
+      FAILED=0
+      for PROJECT in ${CHANGED_PROJECTS}; do
+        echo "━━ Validating ${PROJECT} ━━"
+        STAGE=review
+        *kibot_run || { echo "KiBot failed for ${PROJECT}"; FAILED=1; }
+
+        # Check ERC report for errors (non-zero error count fails the job)
+        ERC_REPORT="projects/${PROJECT}/output/review/reports/erc_${PROJECT}.rpt"
+        if [[ -f "${ERC_REPORT}" ]]; then
+          if grep -qE "^ERC violations: [1-9]" "${ERC_REPORT}"; then
+            echo "ERC errors found in ${PROJECT}:"
+            grep -E "^(ERC|Error)" "${ERC_REPORT}" || true
+            FAILED=1
+          else
+            echo "ERC: OK (no violations)"
+          fi
+        fi
+      done
+      exit ${FAILED}
+  artifacts:
+    when: always
+    paths:
+      - projects/*/output/review/reports/
+    expire_in: 7 days
+
+# ── review stage ─────────────────────────────────────────────────────────────
+
+review:generate:
+  stage: review
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+  script:
+    - *detect_projects
+    - |
+      for PROJECT in ${CHANGED_PROJECTS}; do
+        echo "━━ Generating review outputs for ${PROJECT} ━━"
+        STAGE=review
+        *kibot_run
+      done
+  artifacts:
+    name: "review-${CI_COMMIT_SHORT_SHA}"
+    paths:
+      - projects/*/output/review/
+    expire_in: 30 days
+
+# Commit updated PDFs back to main (docs/ directory)
+review:commit-docs:
+  stage: review
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+  needs: [review:generate]
+  script:
+    - *detect_projects
+    - |
+      git config user.email "ci@kibase"
+      git config user.name  "kibase CI"
+      COMMITTED=0
+      for PROJECT in ${CHANGED_PROJECTS}; do
+        SCH_PDF="projects/${PROJECT}/output/review/schematic_${PROJECT}.pdf"
+        LAY_PDF="projects/${PROJECT}/output/review/layout_${PROJECT}.pdf"
+        mkdir -p "projects/${PROJECT}/docs"
+        [[ -f "${SCH_PDF}" ]] && cp "${SCH_PDF}" "projects/${PROJECT}/docs/schematic.pdf"
+        [[ -f "${LAY_PDF}" ]] && cp "${LAY_PDF}" "projects/${PROJECT}/docs/layout.pdf"
+        git add "projects/${PROJECT}/docs/" || true
+        COMMITTED=1
+      done
+      if [[ "${COMMITTED}" == "1" ]]; then
+        if git diff --cached --quiet; then
+          echo "No PDF changes to commit."
+        else
+          git commit -m "docs: update review PDFs [skip ci]"
+          git push "https://ci:${GITLAB_BOT_TOKEN}@${CI_SERVER_HOST}/${CI_PROJECT_PATH}.git" \
+            "HEAD:${CI_DEFAULT_BRANCH}"
+        fi
+      fi
+
+# KiRI visual diff (MR only)
+review:kiri:
+  stage: review
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+  needs: []
+  script:
+    - *detect_projects
+    - |
+      export KIRI_BASE="${CI_MERGE_REQUEST_DIFF_BASE_SHA}"
+      for PROJECT in ${CHANGED_PROJECTS}; do
+        echo "━━ Generating KiRI diff for ${PROJECT} ━━"
+        mkdir -p "projects/${PROJECT}/output"
+        kibot \
+          --board-file "projects/${PROJECT}/${PROJECT}.kicad_pcb" \
+          --schematic  "projects/${PROJECT}/${PROJECT}.kicad_sch" \
+          --config     "kibot/review.yaml" \
+          --out-dir    "projects/${PROJECT}/output" \
+          -e KIRI_BASE="${KIRI_BASE}" \
+          --skip-pre all \
+          kiri_diff
+      done
+
+    # Push KiRI output to the kiri-pages branch for GitLab Pages hosting
+    - |
+      if [[ -z "${GITLAB_BOT_TOKEN:-}" ]]; then
+        echo "GITLAB_BOT_TOKEN not set — skipping Pages deployment (artifact fallback active)"
+      else
+        git config user.email "ci@kibase"
+        git config user.name  "kibase CI"
+        REMOTE="https://ci:${GITLAB_BOT_TOKEN}@${CI_SERVER_HOST}/${CI_PROJECT_PATH}.git"
+        # Fetch or create kiri-pages branch
+        git fetch "${REMOTE}" kiri-pages:kiri-pages 2>/dev/null || git checkout --orphan kiri-pages && git rm -rf . --quiet && git checkout kiri-pages || true
+        git checkout kiri-pages
+        mkdir -p "public/mr-${CI_MERGE_REQUEST_IID}"
+        for PROJECT in ${CHANGED_PROJECTS}; do
+          KIRI_OUT="projects/${PROJECT}/output/kiri"
+          if [[ -d "${KIRI_OUT}" ]]; then
+            cp -r "${KIRI_OUT}" "public/mr-${CI_MERGE_REQUEST_IID}/${PROJECT}"
+          fi
+        done
+        git add public/
+        if ! git diff --cached --quiet; then
+          git commit -m "kiri: MR !${CI_MERGE_REQUEST_IID} — update diff pages"
+          git push "${REMOTE}" kiri-pages
+        fi
+        # Post MR comment with link
+        for PROJECT in ${CHANGED_PROJECTS}; do
+          KIRI_URL="https://${CI_PAGES_DOMAIN}/mr-${CI_MERGE_REQUEST_IID}/${PROJECT}/"
+          curl --silent --fail --request POST \
+            --header "PRIVATE-TOKEN: ${GITLAB_BOT_TOKEN}" \
+            --data "body=KiRI diff for \`${PROJECT}\`: ${KIRI_URL}" \
+            "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/merge_requests/${CI_MERGE_REQUEST_IID}/notes" \
+            || echo "Warning: failed to post MR comment"
+        done
+      fi
+  artifacts:
+    expose_as: 'KiRI Diff'
+    paths:
+      - projects/*/output/kiri/
+    expire_in: 30 days
+
+# ── release stage ────────────────────────────────────────────────────────────
+
+release:
+  stage: release
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+  needs: [review:generate, review:commit-docs]
+  script:
+    - *detect_projects
+    - |
+      git config user.email "ci@kibase"
+      git config user.name  "kibase CI"
+
+      # Determine which projects have version-bump commits
+      BUMPED_PROJECTS=""
+      for PROJECT in ${CHANGED_PROJECTS}; do
+        if python3 scripts/version-bump.py --dry-run "${PROJECT}" 2>&1 | grep -q "Bump type"; then
+          BUMPED_PROJECTS="${BUMPED_PROJECTS} ${PROJECT}"
+        fi
+      done
+
+      if [[ -z "${BUMPED_PROJECTS}" ]]; then
+        echo "No projects to release."
+        exit 0
+      fi
+
+      # Run actual version bump (updates CHANGELOG.md, VERSION, creates tags)
+      python3 scripts/version-bump.py ${BUMPED_PROJECTS}
+
+      # Generate fab files for bumped projects
+      for PROJECT in ${BUMPED_PROJECTS}; do
+        echo "━━ Generating release outputs for ${PROJECT} ━━"
+        STAGE=release
+        *kibot_run
+      done
+
+      # Commit CHANGELOG.md and VERSION changes
+      git add projects/*/CHANGELOG.md projects/*/VERSION
+      if ! git diff --cached --quiet; then
+        git commit -m "release: bump versions and update changelogs [skip ci]"
+        git push "https://ci:${GITLAB_BOT_TOKEN}@${CI_SERVER_HOST}/${CI_PROJECT_PATH}.git" \
+          "HEAD:${CI_DEFAULT_BRANCH}"
+      fi
+
+      # Push tags
+      git push "https://ci:${GITLAB_BOT_TOKEN}@${CI_SERVER_HOST}/${CI_PROJECT_PATH}.git" --tags
+
+      # Create GitLab releases for each bumped project
+      for PROJECT in ${BUMPED_PROJECTS}; do
+        VERSION="$(cat "projects/${PROJECT}/VERSION" 2>/dev/null || echo "0.0.0")"
+        TAG="${PROJECT}/v${VERSION}"
+        FAB_ZIP="projects/${PROJECT}/output/release/${PROJECT}-fab.zip"
+
+        # Upload fab artifact
+        if [[ -f "${FAB_ZIP}" ]]; then
+          UPLOAD_RESPONSE="$(curl --silent --fail \
+            --header "PRIVATE-TOKEN: ${GITLAB_BOT_TOKEN}" \
+            --form "file=@${FAB_ZIP}" \
+            "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/uploads")"
+          UPLOAD_URL="$(echo "${UPLOAD_RESPONSE}" | python3 -c "import sys,json; print(json.load(sys.stdin)['full_path'])" 2>/dev/null || true)"
+        fi
+
+        # Create release
+        RELEASE_BODY="$(python3 - <<'EOF'
+import sys
+import pathlib
+changelog = pathlib.Path(f"projects/${PROJECT}/CHANGELOG.md").read_text()
+# Extract the first version section
+import re
+m = re.search(r'(## \[v?[\d.]+\].*?)(?=## \[|$)', changelog, re.DOTALL)
+print(m.group(1).strip() if m else "Initial release")
+EOF
+)"
+        curl --silent --fail \
+          --header "PRIVATE-TOKEN: ${GITLAB_BOT_TOKEN}" \
+          --header "Content-Type: application/json" \
+          --data "{
+            \"name\": \"${PROJECT} v${VERSION}\",
+            \"tag_name\": \"${TAG}\",
+            \"description\": \"${RELEASE_BODY}\",
+            \"assets\": {
+              \"links\": [
+                {
+                  \"name\": \"Fabrication package (gerbers + BOM + CPL)\",
+                  \"url\": \"${CI_PROJECT_URL}${UPLOAD_URL}\",
+                  \"link_type\": \"other\"
+                }
+              ]
+            }
+          }" \
+          "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/releases" \
+          || echo "Warning: failed to create GitLab release for ${PROJECT}"
+      done
+  artifacts:
+    name: "release-${CI_COMMIT_SHORT_SHA}"
+    paths:
+      - projects/*/output/release/
+    expire_in: 90 days
+
+# ── MR cleanup (on MR close/merge) ──────────────────────────────────────────
+# Triggered by a GitLab webhook or pipeline trigger on MR close event.
+# Set up a webhook → pipeline trigger that sets CLEANUP_MR_IID variable.
+kiri:cleanup:
+  stage: review
+  rules:
+    - if: $CLEANUP_MR_IID
+  script:
+    - |
+      if [[ -z "${GITLAB_BOT_TOKEN:-}" ]]; then
+        echo "GITLAB_BOT_TOKEN not set — cannot clean up KiRI pages."
+        exit 0
+      fi
+      git config user.email "ci@kibase"
+      git config user.name  "kibase CI"
+      REMOTE="https://ci:${GITLAB_BOT_TOKEN}@${CI_SERVER_HOST}/${CI_PROJECT_PATH}.git"
+      git fetch "${REMOTE}" kiri-pages:kiri-pages 2>/dev/null || exit 0
+      git checkout kiri-pages
+      if [[ -d "public/mr-${CLEANUP_MR_IID}" ]]; then
+        git rm -rf "public/mr-${CLEANUP_MR_IID}"
+        git commit -m "kiri: remove MR !${CLEANUP_MR_IID} pages"
+        git push "${REMOTE}" kiri-pages
+      fi

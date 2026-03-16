@@ -1,0 +1,21 @@
+# KiCad autosave and lock files
+*-backups/
+*.lck
+fp-info-cache
+*.kicad_prl
+
+# Local KiBot output directories
+projects/*/output/
+output/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# references
+/archive
