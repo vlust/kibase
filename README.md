@@ -55,9 +55,7 @@ kibase/
 │       │   ├── example.kicad_pro    # Text variables: REVISION, PROJECT_NAME, COMPANY
 │       │   ├── example.kicad_sch
 │       │   └── example.kicad_pcb
-│       ├── docs/                    # Committed PDFs (auto-updated by CI on main)
-│       │   ├── schematic.pdf
-│       │   └── layout.pdf
+│       ├── docs/                    # Optional static docs (copied to Pages site)
 │       ├── design/                  # Design documents (requirements, block diagrams, notes)
 │       ├── datasheets/              # Component datasheets
 │       ├── simulation/              # SPICE / LTspice simulation files
@@ -71,9 +69,18 @@ kibase/
 │   ├── draft.yaml                   # Draft stage: schematic PDF only
 │   ├── review.yaml                  # Review stage: PDFs + ERC/DRC + iBOM + KiRI diff
 │   └── release.yaml                 # Released stage: review + gerbers + BOM + CPL + zip
+├── pages/
+│   ├── build_site.py                # Generates the GitLab Pages static site
+│   └── templates/
+│       ├── style.css                # Shared stylesheet for all pages
+│       ├── index.html               # Root page template (project cards)
+│       ├── card.html                # Single project card fragment
+│       ├── project.html             # Per-project page template (file list)
+│       └── file_entry.html          # Single file row fragment
 ├── scripts/
 │   ├── generate.sh                  # Local Docker-based generation
 │   ├── detect-changed-projects.sh   # CI helper: list changed projects
+│   ├── build-asset-links.py         # CI helper: build release asset link JSON
 │   └── version-bump.py              # Per-project semver bump + changelog + tag
 ├── .gitlab-ci.yml
 ├── .gitmodules
@@ -129,13 +136,13 @@ redesign: reroute power tree         ← major bump
                                       [review:generate]
                                       Review PDFs generated
                                            │
-                                      [review:commit-docs]
-                                      PDFs committed to docs/
-                                           │
                                       [release]
                                       Version bumped (if change/redesign commits)
-                                      Fab files generated
+                                      Fab files uploaded to package registry
                                       GitLab release created
+                                           │
+                                      [pages]
+                                      Static docs site published to GitLab Pages
 ```
 
 ---
@@ -249,13 +256,50 @@ between commits. On merge requests:
 
 ---
 
+## GitLab Pages
+
+On every push to main, the `pages` job builds a static documentation site
+and publishes it to GitLab Pages. The site includes:
+
+- A root index page with a card per project
+- Per-project pages listing all review outputs (PDFs, reports, images)
+  and anything in the project's `docs/` directory
+
+### Customizing the site
+
+Templates live in `pages/templates/` and use `{{placeholder}}` syntax.
+Edit them directly — no build tooling or dependencies required.
+
+| File | Purpose |
+|---|---|
+| `style.css` | Shared stylesheet for all pages |
+| `index.html` | Root page layout (renders `{{cards}}`) |
+| `card.html` | Project card fragment (`{{slug}}`, `{{version}}`, `{{file_count}}`) |
+| `project.html` | Per-project page layout (`{{slug}}`, `{{version}}`, `{{timestamp}}`, `{{files}}`) |
+| `file_entry.html` | File list row (`{{rel}}`, `{{icon}}`, `{{filename}}`, `{{tag}}`, `{{size}}`) |
+
+To test locally:
+
+```bash
+python3 pages/build_site.py --projects-dir projects --out-dir public
+# open public/index.html in a browser
+```
+
+### Release artifacts
+
+Release artifacts (fab ZIP, schematic PDF, layout PDF) are uploaded to the
+GitLab Generic Package Registry and linked from the GitLab Release page —
+they are no longer committed into the repository.
+
+---
+
 ## CI/CD setup
 
 ### Required CI variables
 
 | Variable | Description |
 |---|---|
-| `GITLAB_BOT_TOKEN` | Project access token (write_repository + api). Optional but needed for doc commits, releases, and KiRI Pages. |
+| `GITLAB_BOT_TOKEN` | Project access token (write_repository + api). Optional but needed for releases, package registry uploads, and KiRI Pages. |
 
 ### Pipeline image
 

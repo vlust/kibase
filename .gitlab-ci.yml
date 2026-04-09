@@ -4,11 +4,12 @@
 # Stages:
 #   validate  — ERC/DRC on all changed projects (MR + push)
 #   review    — Generate review PDFs + KiRI diff (MR + push)
-#   release   — Version bump, commit PDFs, create GitLab release (main only)
+#   release   — Version bump, package registry upload, GitLab release (main)
+#   deploy    — Publish docs to GitLab Pages (main only)
 #
 # Required CI variables:
 #   GITLAB_BOT_TOKEN   — Project access token with write_repository + api scope
-#                        (for pushing docs back to main and KiRI pages branch)
+#                        (for KiRI pages branch, releases, and package registry)
 ##############################################################################
 
 image: ghcr.io/inti-cern/kibot:dev
@@ -24,6 +25,7 @@ stages:
   - validate
   - review
   - release
+  - deploy
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -40,9 +42,6 @@ stages:
 .kibot_run: &kibot_run |
   # Run KiBot for a given project and stage.
   # Expects PROJECT and STAGE variables to be set.
-  # Resolves the project root from KIBASE_PROJECTS_DIR:
-  #   monorepo:       ${KIBASE_PROJECTS_DIR}/${PROJECT}/kicad/
-  #   single-project: kicad/
   if [[ "${KIBASE_PROJECTS_DIR}" == "." ]]; then
     PROJECT_ROOT="."
   else
@@ -77,7 +76,6 @@ validate:
         STAGE=review
         *kibot_run || { echo "KiBot failed for ${PROJECT}"; FAILED=1; }
 
-        # Check ERC report for errors (non-zero error count fails the job)
         ERC_REPORT="projects/${PROJECT}/output/review/reports/erc_${PROJECT}.rpt"
         if [[ -f "${ERC_REPORT}" ]]; then
           if grep -qE "^ERC violations: [1-9]" "${ERC_REPORT}"; then
@@ -117,44 +115,7 @@ review:generate:
       - "*/output/review/"
     expire_in: 30 days
 
-# Commit updated PDFs back to main (docs/ directory)
-review:commit-docs:
-  stage: review
-  rules:
-    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
-  needs: [review:generate]
-  script:
-    - *detect_projects
-    - |
-      git config user.email "ci@kibase"
-      git config user.name  "kibase CI"
-      COMMITTED=0
-      for PROJECT in ${CHANGED_PROJECTS}; do
-        if [[ "${KIBASE_PROJECTS_DIR}" == "." ]]; then
-          PROJECT_ROOT="."
-        else
-          PROJECT_ROOT="${KIBASE_PROJECTS_DIR}/${PROJECT}"
-        fi
-        KICAD_STEM="$(find "${PROJECT_ROOT}/kicad" -maxdepth 1 -name '*.kicad_pro' | head -n1 | xargs basename 2>/dev/null | sed 's/\.kicad_pro//')"
-        SCH_PDF="${PROJECT_ROOT}/output/review/schematic_${KICAD_STEM}.pdf"
-        LAY_PDF="${PROJECT_ROOT}/output/review/layout_${KICAD_STEM}.pdf"
-        mkdir -p "${PROJECT_ROOT}/docs"
-        [[ -f "${SCH_PDF}" ]] && cp "${SCH_PDF}" "${PROJECT_ROOT}/docs/schematic.pdf"
-        [[ -f "${LAY_PDF}" ]] && cp "${LAY_PDF}" "${PROJECT_ROOT}/docs/layout.pdf"
-        git add "${PROJECT_ROOT}/docs/" || true
-        COMMITTED=1
-      done
-      if [[ "${COMMITTED}" == "1" ]]; then
-        if git diff --cached --quiet; then
-          echo "No PDF changes to commit."
-        else
-          git commit -m "docs: update review PDFs [skip ci]"
-          git push "https://ci:${GITLAB_BOT_TOKEN}@${CI_SERVER_HOST}/${CI_PROJECT_PATH}.git" \
-            "HEAD:${CI_DEFAULT_BRANCH}"
-        fi
-      fi
-
-# KiRI visual diff (MR only)
+# KiRI visual diff (MR only) — deployed to kiri-pages branch
 review:kiri:
   stage: review
   rules:
@@ -184,7 +145,7 @@ review:kiri:
           kiri_diff
       done
 
-    # Push KiRI output to the kiri-pages branch for GitLab Pages hosting
+    # Push KiRI output to kiri-pages branch for GitLab Pages
     - |
       if [[ -z "${GITLAB_BOT_TOKEN:-}" ]]; then
         echo "GITLAB_BOT_TOKEN not set — skipping Pages deployment (artifact fallback active)"
@@ -192,7 +153,6 @@ review:kiri:
         git config user.email "ci@kibase"
         git config user.name  "kibase CI"
         REMOTE="https://ci:${GITLAB_BOT_TOKEN}@${CI_SERVER_HOST}/${CI_PROJECT_PATH}.git"
-        # Fetch or create kiri-pages branch
         git fetch "${REMOTE}" kiri-pages:kiri-pages 2>/dev/null || git checkout --orphan kiri-pages && git rm -rf . --quiet && git checkout kiri-pages || true
         git checkout kiri-pages
         mkdir -p "public/mr-${CI_MERGE_REQUEST_IID}"
@@ -211,7 +171,6 @@ review:kiri:
           git commit -m "kiri: MR !${CI_MERGE_REQUEST_IID} — update diff pages"
           git push "${REMOTE}" kiri-pages
         fi
-        # Post MR comment with link
         for PROJECT in ${CHANGED_PROJECTS}; do
           KIRI_URL="https://${CI_PAGES_DOMAIN}/mr-${CI_MERGE_REQUEST_IID}/${PROJECT}/"
           curl --silent --fail --request POST \
@@ -233,14 +192,14 @@ release:
   stage: release
   rules:
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
-  needs: [review:generate, review:commit-docs]
+  needs: [review:generate]
   script:
     - *detect_projects
     - |
       git config user.email "ci@kibase"
       git config user.name  "kibase CI"
 
-      # Determine which projects have version-bump commits
+      # Determine which projects need a version bump
       BUMPED_PROJECTS=""
       for PROJECT in ${CHANGED_PROJECTS}; do
         if python3 scripts/version-bump.py --dry-run "${PROJECT}" 2>&1 | grep -q "Bump type"; then
@@ -253,10 +212,10 @@ release:
         exit 0
       fi
 
-      # Run actual version bump (updates CHANGELOG.md, VERSION, creates tags)
+      # Run version bump (updates CHANGELOG.md, VERSION, creates tags)
       python3 scripts/version-bump.py ${BUMPED_PROJECTS}
 
-      # Generate fab files for bumped projects
+      # Generate fab outputs for bumped projects
       for PROJECT in ${BUMPED_PROJECTS}; do
         echo "━━ Generating release outputs for ${PROJECT} ━━"
         STAGE=release
@@ -278,7 +237,7 @@ release:
       # Push tags
       git push "https://ci:${GITLAB_BOT_TOKEN}@${CI_SERVER_HOST}/${CI_PROJECT_PATH}.git" --tags
 
-      # Create GitLab releases for each bumped project
+      # Upload to package registry + create GitLab releases
       for PROJECT in ${BUMPED_PROJECTS}; do
         if [[ "${KIBASE_PROJECTS_DIR}" == "." ]]; then
           PROJECT_ROOT="."
@@ -289,46 +248,58 @@ release:
         fi
         VERSION="$(cat "${PROJECT_ROOT}/VERSION" 2>/dev/null || echo "0.0.0")"
         KICAD_STEM="$(find "${PROJECT_ROOT}/kicad" -maxdepth 1 -name '*.kicad_pro' | head -n1 | xargs basename 2>/dev/null | sed 's/\.kicad_pro//')"
+
+        # Build asset list and upload to Generic Package Registry
         FAB_ZIP="${PROJECT_ROOT}/output/release/${KICAD_STEM}-fab.zip"
+        SCH_PDF="${PROJECT_ROOT}/output/review/schematic_${KICAD_STEM}.pdf"
+        LAY_PDF="${PROJECT_ROOT}/output/review/layout_${KICAD_STEM}.pdf"
+        PKG_BASE="${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/${PROJECT}/${VERSION}"
 
-        # Upload fab artifact
-        if [[ -f "${FAB_ZIP}" ]]; then
-          UPLOAD_RESPONSE="$(curl --silent --fail \
+        ASSET_META="$(python3 scripts/build-asset-links.py \
+          --base-url "${PKG_BASE}" \
+          "${FAB_ZIP}:Fabrication package (Gerbers + BOM + CPL):package" \
+          "${SCH_PDF}:Schematic PDF:other" \
+          "${LAY_PDF}:Layout PDF:other")"
+
+        ASSET_LINKS="$(echo "${ASSET_META}" | python3 -c "import sys,json; print(json.dumps(json.load(sys.stdin)['links']))")"
+
+        # Upload each file that exists
+        echo "${ASSET_META}" | python3 -c "
+import sys, json
+for u in json.load(sys.stdin)['uploads']:
+    print(u['local_path'] + '\t' + u['url'])
+" | while IFS=$'\t' read -r local_path upload_url; do
+          curl --silent --fail \
             --header "PRIVATE-TOKEN: ${GITLAB_BOT_TOKEN}" \
-            --form "file=@${FAB_ZIP}" \
-            "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/uploads")"
-          UPLOAD_URL="$(echo "${UPLOAD_RESPONSE}" | python3 -c "import sys,json; print(json.load(sys.stdin)['full_path'])" 2>/dev/null || true)"
-        fi
+            --upload-file "${local_path}" \
+            "${upload_url}"
+          echo "  Uploaded $(basename "${local_path}") to registry"
+        done
 
-        # Create release
-        RELEASE_BODY="$(python3 - "${PROJECT_ROOT}" <<'EOF'
-import sys, pathlib, re, os
-project_root = sys.argv[1]
-changelog = pathlib.Path(project_root) / "CHANGELOG.md"
-text = changelog.read_text() if changelog.exists() else ""
-m = re.search(r'(## \[v?[\d.]+\].*?)(?=## \[|$)', text, re.DOTALL)
-print(m.group(1).strip() if m else "Initial release")
-EOF
-)"
+        # Create GitLab Release
+        RELEASE_BODY="$(python3 -c "
+import pathlib, re, sys
+changelog = pathlib.Path(sys.argv[1]) / 'CHANGELOG.md'
+text = changelog.read_text() if changelog.exists() else ''
+m = re.search(r'(## \[v?[\d.]+\].*?)(?=## \[|\Z)', text, re.DOTALL)
+print(m.group(1).strip() if m else 'Initial release')
+" "${PROJECT_ROOT}")"
+
+        RELEASE_BODY_JSON="$(printf '%s' "${RELEASE_BODY}" | python3 -c "import sys,json; print(json.dumps(sys.stdin.read()))")"
+
         curl --silent --fail \
           --header "PRIVATE-TOKEN: ${GITLAB_BOT_TOKEN}" \
           --header "Content-Type: application/json" \
           --data "{
             \"name\": \"${PROJECT} v${VERSION}\",
             \"tag_name\": \"${TAG}\",
-            \"description\": \"${RELEASE_BODY}\",
-            \"assets\": {
-              \"links\": [
-                {
-                  \"name\": \"Fabrication package (gerbers + BOM + CPL)\",
-                  \"url\": \"${CI_PROJECT_URL}${UPLOAD_URL}\",
-                  \"link_type\": \"other\"
-                }
-              ]
-            }
+            \"description\": ${RELEASE_BODY_JSON},
+            \"assets\": { \"links\": ${ASSET_LINKS} }
           }" \
           "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/releases" \
           || echo "Warning: failed to create GitLab release for ${PROJECT}"
+
+        echo "━━ Released ${PROJECT} v${VERSION} ━━"
       done
   artifacts:
     name: "release-${CI_COMMIT_SHORT_SHA}"
@@ -336,9 +307,21 @@ EOF
       - "*/output/release/"
     expire_in: 90 days
 
+# ── deploy stage — GitLab Pages ──────────────────────────────────────────────
+
+pages:
+  stage: deploy
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+  needs: [review:generate]
+  script:
+    - python3 pages/build_site.py --projects-dir "${KIBASE_PROJECTS_DIR}" --out-dir public
+  artifacts:
+    paths:
+      - public
+
 # ── MR cleanup (on MR close/merge) ──────────────────────────────────────────
-# Triggered by a GitLab webhook or pipeline trigger on MR close event.
-# Set up a webhook → pipeline trigger that sets CLEANUP_MR_IID variable.
+
 kiri:cleanup:
   stage: review
   rules:

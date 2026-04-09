@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{slug}}</title>
+  <link rel="stylesheet" href="../style.css">
+</head>
+<body>
+  <div class="breadcrumb"><a href="../">all projects</a> / {{slug}}</div>
+  <div class="header">
+    <h1>{{slug}}</h1>
+    <div class="meta">Version {{version}} &middot; Updated {{timestamp}}</div>
+  </div>
+  <ul class="file-list">
+    {{files}}
+  </ul>
+  <a class="back-link" href="../">&larr; all projects</a>
+</body>
+</html>
